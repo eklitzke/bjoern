@@ -37,5 +37,7 @@ void _init_common()
   _wsgi_input = PyString_FromString("wsgi.input");
   _empty_string = PyString_FromString("");
   _wsgi_version = PyTuple_Pack(2, PyInt_FromLong(1), PyInt_FromLong(0));
+  _callbacks = NULL;
+
   #undef _
 }

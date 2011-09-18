@@ -37,6 +37,18 @@ static bool send_chunk(Request*);
 static bool do_sendfile(Request*);
 static bool handle_nonzero_errno(Request*);
 
+static void _run_fd_callback(const char *cb_name, const int fd)
+{
+  PyObject *cb, *ret;
+  if(_callbacks != NULL) {
+    cb = PyDict_GetItemString(_callbacks, cb_name);
+    if(cb != NULL) {
+      ret = PyObject_CallFunction(cb, "i", fd);
+      Py_XDECREF(ret);
+    }
+  }
+}
+
 void server_run(void)
 {
   struct ev_loop* mainloop = ev_default_loop(0);
@@ -113,6 +125,7 @@ ev_io_on_request(struct ev_loop* mainloop, ev_io* watcher, const int events)
   }
 
   GIL_LOCK(0);
+  _run_fd_callback("connect_callback", client_fd);
   Request* request = Request_new(client_fd, inet_ntoa(sockaddr.sin_addr));
   GIL_UNLOCK(0);
 
@@ -145,6 +158,8 @@ ev_io_on_read(struct ev_loop* mainloop, ev_io* watcher, const int events)
         DBG_REQ(request, "Client disconnected");
       else
         DBG_REQ(request, "Hit errno %d while read()ing", errno);
+
+      _run_fd_callback("close_callback", request->client_fd);
       close(request->client_fd);
       Request_free(request);
       ev_io_stop(mainloop, &request->ev_watcher);
@@ -229,6 +244,7 @@ ev_io_on_write(struct ev_loop* mainloop, ev_io* watcher, const int events)
            * chunk is already sent... just close the connection */
           DBG_REQ(request, "Exception in iterator, can not recover");
           ev_io_stop(mainloop, &request->ev_watcher);
+          _run_fd_callback("close_callback", request->client_fd);
           close(request->client_fd);
           Request_free(request);
           goto out;
@@ -256,6 +272,7 @@ ev_io_on_write(struct ev_loop* mainloop, ev_io* watcher, const int events)
     ev_io_start(mainloop, &request->ev_watcher);
   } else {
     DBG_REQ(request, "done, close");
+    _run_fd_callback("close_callback", request->client_fd);
     close(request->client_fd);
     Request_free(request);
   }
