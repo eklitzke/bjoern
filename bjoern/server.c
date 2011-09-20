@@ -37,15 +37,90 @@ static bool send_chunk(Request*);
 static bool do_sendfile(Request*);
 static bool handle_nonzero_errno(Request*);
 
+typedef struct {
+  PyObject_HEAD
+  PyObject *host;          /* host */
+  PyObject *port;          /* port */
+  PyObject *callbacks;     /* callbacks */
+  struct evloop *ev_loop;
+} WsigServer;
+
+static PyTypeObject WsgiServer_Type = {
+  PyVarObject_HEAD_INIT(NULL, 0)
+  "WSGIServer",                     /* tp_name (__name__)                     */
+  sizeof(WsgiServer),               /* tp_basicsize                           */
+  0,                                /* tp_itemsize                            */
+  (destructor)WsgiServer_dealloc,   /* tp_dealloc                             */
+};
+
+static void
+WsgiServer_dealloc(WsgiServer *self)
+{
+  Py_XDECREF(self->callbacks);
+  Py_XDECREF(self->host);
+  Py_XDECREF(self->port);
+  self->ob_type->tp_free((PyObject*)self);
+}
+
+static int
+WsgiServer_init(WsgiServer *self, PyObject *args, PyObject *kwds)
+{
+  static char *kwlist[] = {"callbacks", NULL}
+  if (!PyArg_ParseTupleAndKeywords(args, kwds, "|O", kwlist, &self->callbacks)) {
+    return -1;
+  }
+  if (!self->callbacks) {
+    self->callbacks = PyDict_New();
+  } else if (!PyDict_Check(self->callbacks)) {
+    PyErr_SetString(
+      PyExc_RuntimeError,
+      "Must call bjoern.listen(app, host, port) before "
+      "calling bjoern.run() without arguments."
+      );
+      return -1;
+  } else {
+    Py_INCREF(self->callbacks);
+  }
+
+  self->host = Py_None;
+  Py_INCREF(Py_NONE);
+  self->port = Py_None;
+  Py_INCREF(Py_NONE);
+
+  return 0;
+}
+
+static PyObject*
+WsgiServer_bind(WsgiServer *self, PyObject*args) {
+  char *host;
+  int port;
+  if(!PyArg_ParseTuple(args, "si:run/listen", &host, &port))
+    return NULL;
+  self->host = host;
+  self->port = port;
+  if (PyInt_Check(port)) {
+    
+    return 
+
+
+static PyMemberDef WsgiServer_members[] = {
+  {"callbacks", T_OBJECT_EX, offsetof(WsgiServer, callbacks), 0, "callbacks to run"},
+  {"host", T_OBJECT_EX, offsetof(WsgiServer, host), 0, "host to bind to"},
+  {"port", T_OBJECT_EX, offsetof(WsgiServer, port), 0, "port to bind to"},
+  {NULL}
+};
+
+
 static void _run_fd_callback(const char *cb_name, const int fd)
 {
-  PyObject *cb, *ret;
-  if(_callbacks != NULL) {
-    cb = PyDict_GetItemString(_callbacks, cb_name);
-    if(cb != NULL) {
-      ret = PyObject_CallFunction(cb, "i", fd);
-      Py_XDECREF(ret);
-    }
+  PyObject *callbacks, *cb, *ret;
+
+  callbacks = PyObject_GetAttrString(
+  if(!PyDict_Check(
+  cb = PyDict_GetItemString(_callbacks, cb_name);
+  if(cb != NULL) {
+    ret = PyObject_CallFunction(cb, "i", fd);
+    Py_XDECREF(ret);
   }
 }
 

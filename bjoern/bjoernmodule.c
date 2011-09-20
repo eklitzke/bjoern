@@ -71,25 +71,6 @@ run(PyObject* self, PyObject* args)
   Py_RETURN_NONE;
 }
 
-PyDoc_STRVAR(callbacks_doc,
-"update_callbacks(**callbacks) -> None\n \
-Update this list of callbacks.");
-static PyObject*
-update_callbacks(PyObject* self, PyObject* callbacks)
-{
-  if(!PyDict_Check(callbacks)) {
-      PyErr_SetString(
-        PyExc_TypeError,
-        "update_callbacks expects a dictionary"
-      );
-  }
-  Py_XDECREF(_callbacks);
-  Py_INCREF(callbacks);
-  _callbacks = callbacks;
-  Py_RETURN_NONE;
-}
-
-
 static PyMethodDef Bjoern_FunctionTable[] = {
   {"run", run, METH_VARARGS, run_doc},
   {"listen", listen, METH_VARARGS, listen_doc},
@@ -109,4 +90,5 @@ PyMODINIT_FUNC initbjoern()
 
   PyObject* bjoern_module = Py_InitModule("bjoern", Bjoern_FunctionTable);
   PyModule_AddObject(bjoern_module, "version", Py_BuildValue("(ii)", 1, 2));
+  PyModule_AddObject(bjoern_module, "callbacks", _callbacks);
 }
