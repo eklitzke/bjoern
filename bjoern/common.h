@@ -55,4 +55,15 @@ PyObject *_REMOTE_ADDR, *_PATH_INFO, *_QUERY_STRING, *_REQUEST_METHOD, *_GET,
   #define assert(...) do{}while(0)
 #endif
 
+typedef struct {
+  PyObject_HEAD
+  PyObject *application;     /* the WSGI application */
+  PyObject *callbacks;       /* callbacks */
+  PyObject *sock;            /* socket fd */
+  PyObject *wsgi_base_dict;  /* WSGI environment template */
+  int socket;
+  struct evloop *ev_loop;
+} WsgiServer;
+
+
 #endif

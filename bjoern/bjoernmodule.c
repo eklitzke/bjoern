@@ -1,42 +1,24 @@
 #include <Python.h>
 #include "server.h"
 #include "wsgi.h"
-#include "bjoernmodule.h"
 #include "filewrapper.h"
 
 PyDoc_STRVAR(run_doc,
-"run(application, host, port) -> None\n \
-Calls listen(application, host, port) and starts the server mainloop.\n \
-\n\
-run() -> None\n \
-Starts the server mainloop. listen(...) has to be called before calling \
-run() without arguments.");
+"run() -> None\n \
+Run the applications");
 static PyObject*
-run(PyObject* self, PyObject* args)
+run(PyObject* self)
 {
-  if(PyTuple_GET_SIZE(args) == 0) {
-    /* bjoern.run() */
-    if(!wsgi_app) {
-      PyErr_SetString(
-        PyExc_RuntimeError,
-        "Must call bjoern.listen(app, host, port) before "
-        "calling bjoern.run() without arguments."
-      );
-      return NULL;
-    }
-  } else {
-    /* bjoern.run(app, host, port) */
-    if(!listen(self, args))
-      return NULL;
+  /* This is a METH_NOARGS, so ensure self is NULL */
+  if (self != NULL) {
+    return NULL;
   }
-
   server_run();
-  wsgi_app = NULL;
   Py_RETURN_NONE;
 }
 
 static PyMethodDef Bjoern_FunctionTable[] = {
-  {"run", run, METH_VARARGS, run_doc},
+  {"run", run, METH_NOARGS, run_doc},
   {NULL, NULL, 0, NULL}
 };
 

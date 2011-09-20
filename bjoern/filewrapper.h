@@ -1,3 +1,6 @@
+#ifndef __filewrapper_h_
+#define __filewrapper_h_
+
 #include "common.h"
 
 #define FileWrapper_CheckExact(x) ((x)->ob_type == &FileWrapper_Type)
@@ -10,3 +13,5 @@ typedef struct {
 } FileWrapper;
 
 void (_init_filewrapper)();
+
+#endif /* __filewrapper_h_ */

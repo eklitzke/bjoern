@@ -6,7 +6,6 @@
 static inline void PyDict_ReplaceKey(PyObject* dict, PyObject* k1, PyObject* k2);
 static PyObject* wsgi_http_header(string header);
 static http_parser_settings parser_settings;
-static PyObject* wsgi_base_dict = NULL;
 
 /* Non-public type from cStringIO I abuse in on_body */
 typedef struct {
@@ -16,13 +15,14 @@ typedef struct {
   PyObject *pbuf;
 } Iobject;
 
-Request* Request_new(int client_fd, const char* client_addr)
+Request* Request_new(int client_fd, const char* client_addr, WsgiServer *wsgi_server)
 {
   Request* request = malloc(sizeof(Request));
 #ifdef DEBUG
   static unsigned long request_id = 0;
   request->id = request_id++;
 #endif
+  request->wsgi_server = wsgi_server;
   request->client_fd = client_fd;
   request->client_addr = PyString_FromString(client_addr);
   http_parser_init((http_parser*)&request->parser, HTTP_REQUEST);
@@ -224,10 +224,12 @@ on_message_complete(http_parser* parser)
     ((Iobject*)body)->pos = 0;
   } else {
     /* Request has no body */
-    _set_header_free_value(_wsgi_input, PycStringIO->NewInput(_empty_string));
+    //PyObject *v = PycStringIO->NewInput(_empty_string);
+    PyObject *v = PycStringIO->NewInput(PyString_FromString(""));
+    _set_header_free_value(_wsgi_input, v);
   }
 
-  PyDict_Update(REQUEST->headers, wsgi_base_dict);
+  PyDict_Update(REQUEST->headers, REQUEST->wsgi_server->wsgi_base_dict);
 
   REQUEST->state.parse_finished = true;
   return 0;
@@ -277,83 +279,3 @@ parser_settings = {
   on_message_begin, on_path, on_query_string, NULL, NULL, on_header_field,
   on_header_value, on_headers_complete, on_body, on_message_complete
 };
-
-void _initialize_request_module(const char* server_host, const int server_port)
-{
-  if(wsgi_base_dict == NULL) {
-    PycString_IMPORT;
-    wsgi_base_dict = PyDict_New();
-
-    /* dct['wsgi.file_wrapper'] = FileWrapper */
-    PyDict_SetItemString(
-      wsgi_base_dict,
-      "wsgi.file_wrapper",
-      (PyObject*)&FileWrapper_Type
-    );
-
-    /* dct['SCRIPT_NAME'] = '' */
-    PyDict_SetItemString(
-      wsgi_base_dict,
-      "SCRIPT_NAME",
-      _empty_string
-    );
-
-    /* dct['wsgi.version'] = (1, 0) */
-    PyDict_SetItemString(
-      wsgi_base_dict,
-      "wsgi.version",
-      PyTuple_Pack(2, PyInt_FromLong(1), PyInt_FromLong(0))
-    );
-
-    /* dct['wsgi.url_scheme'] = 'http'
-     * (This can be hard-coded as there is no TLS support in bjoern.) */
-    PyDict_SetItemString(
-      wsgi_base_dict,
-      "wsgi.url_scheme",
-      PyString_FromString("http")
-    );
-
-    /* dct['wsgi.errors'] = sys.stderr */
-    PyDict_SetItemString(
-      wsgi_base_dict,
-      "wsgi.errors",
-      PySys_GetObject("stderr")
-    );
-
-    /* dct['wsgi.multithread'] = True
-     * If I correctly interpret the WSGI specs, this means
-     * "Can the server be ran in a thread?" */
-    PyDict_SetItemString(
-      wsgi_base_dict,
-      "wsgi.multithread",
-      Py_True
-    );
-
-    /* dct['wsgi.multiprocess'] = True
-     * ... and this one "Can the server process be forked?" */
-    PyDict_SetItemString(
-      wsgi_base_dict,
-      "wsgi.multiprocess",
-      Py_True
-    );
-
-    /* dct['wsgi.run_once'] = False (bjoern is no CGI gateway) */
-    PyDict_SetItemString(
-      wsgi_base_dict,
-      "wsgi.run_once",
-      Py_False
-    );
-  }
-
-  PyDict_SetItemString(
-    wsgi_base_dict,
-    "SERVER_NAME",
-    PyString_FromString(server_host)
-  );
-
-  PyDict_SetItemString(
-    wsgi_base_dict,
-    "SERVER_PORT",
-    PyString_FromFormat("%d", server_port)
-  );
-}

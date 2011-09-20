@@ -11,6 +11,7 @@
 #include <sys/sendfile.h>
 #include <ev.h>
 #include "common.h"
+#include "filewrapper.h"
 #include "wsgi.h"
 #include "server.h"
 
@@ -39,16 +40,35 @@ static bool send_chunk(Request*);
 static bool do_sendfile(Request*);
 static bool handle_nonzero_errno(Request*);
 
-static PyObject *_wsgi_servers;
+static PyObject *_server_fd_map;
+static PyObject *_client_fd_map;
 
-typedef struct {
-  PyObject_HEAD
-  PyObject *callbacks;     /* callbacks */
-  PyObject *sock;     /* callbacks */
-  int socket;
-  struct evloop *ev_loop;
-} WsgiServer;
+/* Get a WSGIServer object from a file descriptor. Note that it's not necessary
+ * to increase the reference count of the server object here before using it
+ * from arbitrary Python code, since _server_fd_map retains a hidden reference
+ * to the server (and the _server_fd_map dictionary is hidden from non-module
+ * Python code).
+ */
+static WsgiServer*
+wsgi_server_from_fd(PyObject *map, int fd) {
+  WsgiServer *return_val;
+  PyObject *int_obj = PyInt_FromLong((long) fd);
+  return_val = (WsgiServer *) PyDict_GetItem(map, int_obj);
+  Py_DECREF(int_obj);
+  assert(return_val != NULL);
+  assert(return_val->socket == fd);
+  return return_val;
+}
 
+static bool
+add_fd_to_map(PyObject* map, int fd, WsgiServer* val)
+{
+  // XXX: add error handling
+  PyObject *py_fd = PyInt_FromLong((long) fd);
+  PyDict_SetItem(map, py_fd, (PyObject *) val);
+  Py_DECREF(py_fd);
+  return true;
+}
 
 static void
 WsgiServer_dealloc(WsgiServer *self)
@@ -57,21 +77,29 @@ WsgiServer_dealloc(WsgiServer *self)
     close(self->socket);
   }
   if (self->sock != NULL) {
-    PyDict_DelItem(_wsgi_servers, self->sock);
+    PyDict_DelItem(_server_fd_map, self->sock);
     Py_DECREF(self->sock);
   }
   Py_DECREF(self->callbacks);
+  Py_DECREF(self->wsgi_base_dict);
   self->ob_type->tp_free((PyObject*)self);
 }
 
 static int
 WsgiServer_init(WsgiServer *self, PyObject *args, PyObject *kwds)
 {
-  static char *kwlist[] = {"callbacks", NULL};
-  if (!PyArg_ParseTupleAndKeywords(args, kwds, "|O", kwlist, &self->callbacks)) {
+  static char *kwlist[] = {"application", "callbacks", NULL};
+  self->socket = -1;
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|O", kwlist, &self->application, &self->callbacks)) {
     return -1;
   }
-  self->socket = -1;
+
+  if (!PyCallable_Check(self->application)) {
+    PyErr_SetString(PyExc_TypeError, "application must be callable");
+    return -1;
+  }
+
   if (!self->callbacks) {
     if ((self->callbacks = PyDict_New()) == NULL)
       return -1;
@@ -84,6 +112,9 @@ WsgiServer_init(WsgiServer *self, PyObject *args, PyObject *kwds)
 
   Py_INCREF(Py_None);
   self->sock = Py_None;
+
+  Py_INCREF(Py_None);
+  self->wsgi_base_dict = Py_None;
 
   return 0;
 }
@@ -106,7 +137,7 @@ WsgiServer_listen(WsgiServer *self, PyObject*args) {
    * socket
    */
   if (self->socket >= 0) {
-    PyDict_DelItem(_wsgi_servers, self->sock);
+    PyDict_DelItem(_server_fd_map, self->sock);
     Py_DECREF(self->sock);
     close(self->socket);
     self->socket = -1;
@@ -118,14 +149,14 @@ WsgiServer_listen(WsgiServer *self, PyObject*args) {
   }
 
   /* expose the python version of the socket fd */
-  if ((self->sock = PyInt_FromLong((long) port)) < 0) {
+  if ((self->sock = PyInt_FromLong((long) self->socket)) == NULL) {
     close(self->socket);
     self->socket = -1;
     return NULL;
   }
 
   /* update the global socket map */
-  if (PyDict_SetItem(_wsgi_servers, self->sock, self) < 0) {
+  if (PyDict_SetItem(_server_fd_map, self->sock, (PyObject *) self) < 0) {
     close(self->socket);
     self->socket = -1;
     Py_DECREF(self->sock);
@@ -151,18 +182,107 @@ WsgiServer_listen(WsgiServer *self, PyObject*args) {
   }
 
   DBG("Listening on %s:%d...", host, port);
+
+  Py_DECREF(self->wsgi_base_dict);
+  self->wsgi_base_dict = PyDict_New();
+  
+  /* dct['wsgi.file_wrapper'] = FileWrapper */
+  PyDict_SetItemString(
+    self->wsgi_base_dict,
+    "wsgi.file_wrapper",
+    (PyObject*)&FileWrapper_Type
+    );
+  
+  /* dct['SCRIPT_NAME'] = '' */
+  PyDict_SetItemString(
+    self->wsgi_base_dict,
+    "SCRIPT_NAME",
+    _empty_string
+    );
+  
+  /* dct['wsgi.version'] = (1, 0) */
+  PyDict_SetItemString(
+    self->wsgi_base_dict,
+    "wsgi.version",
+    PyTuple_Pack(2, PyInt_FromLong(1), PyInt_FromLong(0))
+    );
+  
+  /* dct['wsgi.url_scheme'] = 'http'
+   * (This can be hard-coded as there is no TLS support in bjoern.) */
+  PyDict_SetItemString(
+    self->wsgi_base_dict,
+    "wsgi.url_scheme",
+    PyString_FromString("http")
+    );
+  
+  /* dct['wsgi.errors'] = sys.stderr */
+  PyDict_SetItemString(
+    self->wsgi_base_dict,
+    "wsgi.errors",
+    PySys_GetObject("stderr")
+    );
+  
+  /* dct['wsgi.multithread'] = True
+   * If I correctly interpret the WSGI specs, this means
+   * "Can the server be ran in a thread?" */
+  PyDict_SetItemString(
+    self->wsgi_base_dict,
+    "wsgi.multithread",
+    Py_True
+    );
+
+  /* dct['wsgi.multiprocess'] = True
+   * ... and this one "Can the server process be forked?" */
+  PyDict_SetItemString(
+    self->wsgi_base_dict,
+    "wsgi.multiprocess",
+    Py_True
+    );
+  
+  /* dct['wsgi.run_once'] = False (bjoern is no CGI gateway) */
+  PyDict_SetItemString(
+    self->wsgi_base_dict,
+    "wsgi.run_once",
+    Py_False
+    );
+
+  PyDict_SetItemString(
+    self->wsgi_base_dict,
+    "SERVER_NAME",
+    PyString_FromString(host)
+    );
+  
+  PyDict_SetItemString(
+    self->wsgi_base_dict,
+    "SERVER_PORT",
+    PyString_FromFormat("%d", port)
+    );
+  
   Py_RETURN_NONE;
 
 listen_err:
-  PyDict_DelItem(_wsgi_servers, self->sock);
+  PyDict_DelItem(_server_fd_map, self->sock);
   Py_DECREF(self->sock);
   close(self->socket);
   self->socket = -1;
   return NULL;
 }
 
+static void
+WsgiServer_run_callback(WsgiServer *server, const char *callback_name) {
+  PyObject *cb;
+  cb = PyDict_GetItemString(server->callbacks, callback_name);
+  if (cb && PyCallable_Check(cb)) {
+    Py_INCREF(cb);
+    PyObject_CallObject(cb, NULL);
+    Py_DECREF(cb);
+  }
+}
+
 static PyMemberDef WsgiServer_members[] = {
-  {"callbacks", T_OBJECT_EX, offsetof(WsgiServer, callbacks), 0, "callbacks to run"},
+  {"application", T_OBJECT_EX, offsetof(WsgiServer, application), 0, "the WSGI application"},
+  {"_callbacks", T_OBJECT_EX, offsetof(WsgiServer, callbacks), 0, "callbacks to run"},
+  {"_environ_template", T_OBJECT_EX, offsetof(WsgiServer, wsgi_base_dict), 0, "the WSGI environ template"},
   {"_sockfd", T_OBJECT_EX, offsetof(WsgiServer, sock), 0, "the fd of the socket"},
   {NULL}
 };
@@ -181,12 +301,31 @@ PyTypeObject WsgiServer_Type = {
 };
 
 
-void server_run(void)
+bool server_run(void)
 {
   struct ev_loop* mainloop = ev_default_loop(0);
-
   ev_io accept_watcher;
-  // XXX ev_io_init(&accept_watcher, ev_io_on_request, sockfd, EV_READ);
+  
+  /* watch each file descriptor; TODO: need a way to add file descriptors into
+   * the loop later on (i.e. after bjoern is already running)
+   */
+  PyObject *iterator = PyObject_GetIter(_server_fd_map);
+  PyObject *item;
+  if (iterator == NULL) {
+    return false;
+  }
+  while ((item = PyIter_Next(iterator))) {
+    int sockfd = (int) PyInt_AS_LONG(item);
+    Py_DECREF(item);
+    DBG("watching socket for client connections %d", sockfd);
+    ev_io_init(&accept_watcher, ev_io_on_request, sockfd, EV_READ);
+  }
+  Py_DECREF(iterator);
+
+  if (PyErr_Occurred()) {
+    return false;
+  }
+
   ev_io_start(mainloop, &accept_watcher);
 
 #if WANT_SIGINT_HANDLING
@@ -199,6 +338,7 @@ void server_run(void)
   Py_BEGIN_ALLOW_THREADS
   ev_loop(mainloop, 0);
   Py_END_ALLOW_THREADS
+  return true;
 }
 
 #if WANT_SIGINT_HANDLING
@@ -238,8 +378,10 @@ ev_io_on_request(struct ev_loop* mainloop, ev_io* watcher, const int events)
   }
 
   GIL_LOCK(0);
-  // XXX _run_fd_callback("connect_callback", client_fd);
-  Request* request = Request_new(client_fd, inet_ntoa(sockaddr.sin_addr));
+  WsgiServer *server = wsgi_server_from_fd(_server_fd_map, watcher->fd);
+  WsgiServer_run_callback(server, "connect_callback");
+  add_fd_to_map(_client_fd_map, client_fd, server);
+  Request* request = Request_new(client_fd, inet_ntoa(sockaddr.sin_addr), server);
   GIL_UNLOCK(0);
 
   DBG_REQ(request, "Accepted client %s:%d on fd %d",
@@ -289,7 +431,8 @@ ev_io_on_read(struct ev_loop* mainloop, ev_io* watcher, const int events)
     assert(request->iterator == NULL);
   }
   else if(request->state.parse_finished) {
-    if(!wsgi_call_application(request)) {
+    WsgiServer *server = wsgi_server_from_fd(_client_fd_map, request->client_fd);
+    if(!wsgi_call_application(request, server->application)) {
       assert(PyErr_Occurred());
       PyErr_Print();
       assert(!request->state.chunked_response);
@@ -397,7 +540,6 @@ out:
 static bool
 send_chunk(Request* request)
 {
-  Py_ssize_t chunk_length;
   Py_ssize_t bytes_sent;
 
   assert(request->current_chunk != NULL);
@@ -456,14 +598,16 @@ handle_nonzero_errno(Request* request)
 bool _init_server(void)
 {
     WsgiServer_Type.tp_new = PyType_GenericNew;
-    WsgiServer_Type.tp_init = WsgiServer_init;
+    WsgiServer_Type.tp_init = (initproc) WsgiServer_init;
     WsgiServer_Type.tp_flags |= Py_TPFLAGS_DEFAULT;
     WsgiServer_Type.tp_members = WsgiServer_members;
     WsgiServer_Type.tp_methods = WsgiServer_methods;
 
-    _wsgi_servers = PyDict_New();
-    if (_wsgi_servers == NULL) {
+    _server_fd_map = PyDict_New();
+    if (_server_fd_map == NULL)
       return false;
-    }
+    _client_fd_map = PyDict_New();
+    if (_client_fd_map == NULL)
+      return false;
     return true;
 }

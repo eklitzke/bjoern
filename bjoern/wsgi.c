@@ -1,5 +1,4 @@
 #include "common.h"
-#include "bjoernmodule.h"
 #include "filewrapper.h"
 #include "wsgi.h"
 
@@ -14,7 +13,7 @@ typedef struct {
 } StartResponse;
 
 bool
-wsgi_call_application(Request* request)
+wsgi_call_application(Request* request, PyObject *wsgi_app)
 {
   StartResponse* start_response = PyObject_NEW(StartResponse, &StartResponse_Type);
   start_response->request = request;

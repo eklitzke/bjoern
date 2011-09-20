@@ -4,8 +4,7 @@
 #include <ev.h>
 #include "http_parser.h"
 #include "common.h"
-
-void _initialize_request_module(const char* host, const int port);
+#include "server.h"
 
 typedef struct {
   unsigned error_code : 2;
@@ -43,12 +42,13 @@ typedef struct {
   Py_ssize_t current_chunk_p;
   PyObject* iterable;
   PyObject* iterator;
+  WsgiServer* wsgi_server;
 } Request;
 
 #define REQUEST_FROM_WATCHER(watcher) \
   (Request*)((size_t)watcher - (size_t)(&(((Request*)NULL)->ev_watcher)));
 
-Request* Request_new(int client_fd, const char* client_addr);
+Request* Request_new(int client_fd, const char* client_addr, WsgiServer *wsgi_server);
 void Request_parse(Request*, const char*, const size_t);
 void Request_reset(Request*);
 void Request_clean(Request*);
