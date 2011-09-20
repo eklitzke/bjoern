@@ -4,42 +4,6 @@
 #include "bjoernmodule.h"
 #include "filewrapper.h"
 
-
-PyDoc_STRVAR(listen_doc,
-"listen(application, host, port) -> None\n\n \
-\
-Makes bjoern listen to host:port and use application as WSGI callback. \
-(This does not run the server mainloop.)");
-static PyObject*
-listen(PyObject* self, PyObject* args)
-{
-  const char* host;
-  int port;
-
-  if(wsgi_app) {
-    PyErr_SetString(
-      PyExc_RuntimeError,
-      "Only one bjoern server per Python interpreter is allowed"
-    );
-    return NULL;
-  }
-
-  if(!PyArg_ParseTuple(args, "Osi:run/listen", &wsgi_app, &host, &port))
-    return NULL;
-
-  _initialize_request_module(host, port);
-
-  if(!server_init(host, port)) {
-    PyErr_Format(
-      PyExc_RuntimeError,
-      "Could not start server on %s:%d", host, port
-    );
-    return NULL;
-  }
-
-  Py_RETURN_NONE;
-}
-
 PyDoc_STRVAR(run_doc,
 "run(application, host, port) -> None\n \
 Calls listen(application, host, port) and starts the server mainloop.\n \
@@ -73,22 +37,30 @@ run(PyObject* self, PyObject* args)
 
 static PyMethodDef Bjoern_FunctionTable[] = {
   {"run", run, METH_VARARGS, run_doc},
-  {"listen", listen, METH_VARARGS, listen_doc},
-  {"update_callbacks", update_callbacks, METH_O, callbacks_doc},
   {NULL, NULL, 0, NULL}
 };
 
-PyMODINIT_FUNC initbjoern()
+PyMODINIT_FUNC
+initbjoern(void)
 {
+  PyObject *bjoern_module;
   _init_common();
+  _init_server();
   _init_filewrapper();
 
-  PyType_Ready(&FileWrapper_Type);
-  assert(FileWrapper_Type.tp_flags & Py_TPFLAGS_READY);
-  PyType_Ready(&StartResponse_Type);
-  assert(StartResponse_Type.tp_flags & Py_TPFLAGS_READY);
+  if (PyType_Ready(&WsgiServer_Type) < 0)
+    return;
+  if (PyType_Ready(&FileWrapper_Type) < 0)
+    return;
+  if (PyType_Ready(&StartResponse_Type) < 0)
+    return;
 
-  PyObject* bjoern_module = Py_InitModule("bjoern", Bjoern_FunctionTable);
+  bjoern_module = Py_InitModule3("bjoern", Bjoern_FunctionTable, "bjoern WSGI/HTTP gateway");
+
+  Py_INCREF(&WsgiServer_Type);
+  Py_INCREF(&FileWrapper_Type);
+  Py_INCREF(&StartResponse_Type);
+
   PyModule_AddObject(bjoern_module, "version", Py_BuildValue("(ii)", 1, 2));
-  PyModule_AddObject(bjoern_module, "callbacks", _callbacks);
+  PyModule_AddObject(bjoern_module, "WsgiServer", (PyObject *) &WsgiServer_Type);
 }

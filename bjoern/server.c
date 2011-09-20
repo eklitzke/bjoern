@@ -1,3 +1,6 @@
+#include <Python.h>
+#include "structmember.h"
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -17,7 +20,6 @@
 #define GIL_LOCK(n) PyGILState_STATE _gilstate_##n = PyGILState_Ensure()
 #define GIL_UNLOCK(n) PyGILState_Release(_gilstate_##n)
 
-static int sockfd;
 static const char* http_error_messages[4] = {
   NULL, /* Error codes start at 1 because 0 means "no error" */
   "HTTP/1.1 400 Bad Request\r\n\r\n",
@@ -39,36 +41,30 @@ static bool handle_nonzero_errno(Request*);
 
 typedef struct {
   PyObject_HEAD
-  PyObject *host;          /* host */
-  PyObject *port;          /* port */
   PyObject *callbacks;     /* callbacks */
+  int socket;
   struct evloop *ev_loop;
-} WsigServer;
+} WsgiServer;
 
-static PyTypeObject WsgiServer_Type = {
-  PyVarObject_HEAD_INIT(NULL, 0)
-  "WSGIServer",                     /* tp_name (__name__)                     */
-  sizeof(WsgiServer),               /* tp_basicsize                           */
-  0,                                /* tp_itemsize                            */
-  (destructor)WsgiServer_dealloc,   /* tp_dealloc                             */
-};
 
 static void
 WsgiServer_dealloc(WsgiServer *self)
 {
+  if (self->socket >= 0) {
+    close(self->socket);
+  }
   Py_XDECREF(self->callbacks);
-  Py_XDECREF(self->host);
-  Py_XDECREF(self->port);
   self->ob_type->tp_free((PyObject*)self);
 }
 
 static int
 WsgiServer_init(WsgiServer *self, PyObject *args, PyObject *kwds)
 {
-  static char *kwlist[] = {"callbacks", NULL}
+  static char *kwlist[] = {"callbacks", NULL};
   if (!PyArg_ParseTupleAndKeywords(args, kwds, "|O", kwlist, &self->callbacks)) {
     return -1;
   }
+  self->socket = -1;
   if (!self->callbacks) {
     self->callbacks = PyDict_New();
   } else if (!PyDict_Check(self->callbacks)) {
@@ -81,55 +77,80 @@ WsgiServer_init(WsgiServer *self, PyObject *args, PyObject *kwds)
   } else {
     Py_INCREF(self->callbacks);
   }
-
-  self->host = Py_None;
-  Py_INCREF(Py_NONE);
-  self->port = Py_None;
-  Py_INCREF(Py_NONE);
-
   return 0;
 }
 
 static PyObject*
-WsgiServer_bind(WsgiServer *self, PyObject*args) {
+WsgiServer_listen(WsgiServer *self, PyObject*args) {
   char *host;
   int port;
-  if(!PyArg_ParseTuple(args, "si:run/listen", &host, &port))
-    return NULL;
-  self->host = host;
-  self->port = port;
-  if (PyInt_Check(port)) {
-    
-    return 
+  struct sockaddr_in sockaddr;
 
+  if(!PyArg_ParseTuple(args, "si:listen", &host, &port))
+    return NULL;
+
+  if (port < 0 || port >= 65536) {
+    PyErr_SetString(PyExc_ValueError, "port not in range [0, 65535]");
+    return NULL;
+  }
+
+  if ((self->socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
+    PyErr_SetString(PyExc_IOError, "failed to create socket");
+    return NULL;
+  }
+
+  sockaddr.sin_family = AF_INET;
+  inet_pton(AF_INET, host, &sockaddr.sin_addr);
+  sockaddr.sin_port = htons((uint16_t) port);
+
+  /* Set SO_REUSEADDR t make the IP address available for reuse */
+  int optval = 1;
+  setsockopt(self->socket, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+
+  if (bind(self->socket, (struct sockaddr*)&sockaddr, sizeof(sockaddr)) < 0) {
+    PyErr_SetString(PyExc_IOError, "failed to bind()");
+    goto listen_err;
+  }
+
+  if (listen(self->socket, LISTEN_BACKLOG) < 0) {
+    PyErr_SetString(PyExc_IOError, "failed to listen()");
+    goto listen_err;
+  }
+
+  DBG("Listening on %s:%d...", host, port);
+  Py_RETURN_NONE;
+
+listen_err:
+  close(self->socket);
+  self->socket = -1;
+  return NULL;
+}
 
 static PyMemberDef WsgiServer_members[] = {
   {"callbacks", T_OBJECT_EX, offsetof(WsgiServer, callbacks), 0, "callbacks to run"},
-  {"host", T_OBJECT_EX, offsetof(WsgiServer, host), 0, "host to bind to"},
-  {"port", T_OBJECT_EX, offsetof(WsgiServer, port), 0, "port to bind to"},
   {NULL}
 };
 
+static PyMethodDef WsgiServer_methods[] = {
+  {"listen", (PyCFunction) WsgiServer_listen, METH_VARARGS, "listen"},
+  {NULL, NULL, 0, NULL}
+};
 
-static void _run_fd_callback(const char *cb_name, const int fd)
-{
-  PyObject *callbacks, *cb, *ret;
+PyTypeObject WsgiServer_Type = {
+  PyVarObject_HEAD_INIT(NULL, 0)
+  "WSGIServer",                     /* tp_name (__name__)                     */
+  sizeof(WsgiServer),               /* tp_basicsize                           */
+  0,                                /* tp_itemsize                            */
+  (destructor)WsgiServer_dealloc,   /* tp_dealloc                             */
+};
 
-  callbacks = PyObject_GetAttrString(
-  if(!PyDict_Check(
-  cb = PyDict_GetItemString(_callbacks, cb_name);
-  if(cb != NULL) {
-    ret = PyObject_CallFunction(cb, "i", fd);
-    Py_XDECREF(ret);
-  }
-}
 
 void server_run(void)
 {
   struct ev_loop* mainloop = ev_default_loop(0);
 
   ev_io accept_watcher;
-  ev_io_init(&accept_watcher, ev_io_on_request, sockfd, EV_READ);
+  // XXX ev_io_init(&accept_watcher, ev_io_on_request, sockfd, EV_READ);
   ev_io_start(mainloop, &accept_watcher);
 
 #if WANT_SIGINT_HANDLING
@@ -157,26 +178,6 @@ ev_signal_on_sigint(struct ev_loop* mainloop, ev_signal* watcher, const int even
 
 bool server_init(const char* hostaddr, const int port)
 {
-  if((sockfd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
-    return false;
-
-  struct sockaddr_in sockaddr;
-  sockaddr.sin_family = PF_INET;
-  inet_pton(AF_INET, hostaddr, &sockaddr.sin_addr);
-  sockaddr.sin_port = htons(port);
-
-  /* Set SO_REUSEADDR t make the IP address available for reuse */
-  int optval = true;
-  setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-
-  if(bind(sockfd, (struct sockaddr*)&sockaddr, sizeof(sockaddr)) < 0)
-    return false;
-
-  if(listen(sockfd, LISTEN_BACKLOG) < 0)
-    return false;
-
-  DBG("Listening on %s:%d...", hostaddr, port);
-  return true;
 }
 
 static void
@@ -200,7 +201,7 @@ ev_io_on_request(struct ev_loop* mainloop, ev_io* watcher, const int events)
   }
 
   GIL_LOCK(0);
-  _run_fd_callback("connect_callback", client_fd);
+  // XXX _run_fd_callback("connect_callback", client_fd);
   Request* request = Request_new(client_fd, inet_ntoa(sockaddr.sin_addr));
   GIL_UNLOCK(0);
 
@@ -234,7 +235,7 @@ ev_io_on_read(struct ev_loop* mainloop, ev_io* watcher, const int events)
       else
         DBG_REQ(request, "Hit errno %d while read()ing", errno);
 
-      _run_fd_callback("close_callback", request->client_fd);
+      // XXX _run_fd_callback("close_callback", request->client_fd);
       close(request->client_fd);
       Request_free(request);
       ev_io_stop(mainloop, &request->ev_watcher);
@@ -319,7 +320,7 @@ ev_io_on_write(struct ev_loop* mainloop, ev_io* watcher, const int events)
            * chunk is already sent... just close the connection */
           DBG_REQ(request, "Exception in iterator, can not recover");
           ev_io_stop(mainloop, &request->ev_watcher);
-          _run_fd_callback("close_callback", request->client_fd);
+          // XXX _run_fd_callback("close_callback", request->client_fd);
           close(request->client_fd);
           Request_free(request);
           goto out;
@@ -347,7 +348,7 @@ ev_io_on_write(struct ev_loop* mainloop, ev_io* watcher, const int events)
     ev_io_start(mainloop, &request->ev_watcher);
   } else {
     DBG_REQ(request, "done, close");
-    _run_fd_callback("close_callback", request->client_fd);
+    // XXX _run_fd_callback("close_callback", request->client_fd);
     close(request->client_fd);
     Request_free(request);
   }
@@ -413,4 +414,13 @@ handle_nonzero_errno(Request* request)
     request->state.keep_alive = false;
     return false;
   }
+}
+
+void _init_server(void)
+{
+    WsgiServer_Type.tp_new = PyType_GenericNew;
+    WsgiServer_Type.tp_init = WsgiServer_init;
+    WsgiServer_Type.tp_flags |= Py_TPFLAGS_DEFAULT;
+    WsgiServer_Type.tp_members = WsgiServer_members;
+    WsgiServer_Type.tp_methods = WsgiServer_methods;
 }
