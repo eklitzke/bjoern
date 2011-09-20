@@ -33,6 +33,7 @@ typedef struct {
 
   int client_fd;
   PyObject* client_addr;
+  WsgiServer* wsgi_server;
 
   request_state state;
 
@@ -42,7 +43,6 @@ typedef struct {
   Py_ssize_t current_chunk_p;
   PyObject* iterable;
   PyObject* iterator;
-  WsgiServer* wsgi_server;
 } Request;
 
 #define REQUEST_FROM_WATCHER(watcher) \
@@ -53,5 +53,7 @@ void Request_parse(Request*, const char*, const size_t);
 void Request_reset(Request*);
 void Request_clean(Request*);
 void Request_free(Request*);
+
+void _init_request(void);
 
 #endif

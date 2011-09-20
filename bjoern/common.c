@@ -7,6 +7,7 @@
 
 size_t unquote_url_inplace(char* url, size_t len)
 {
+  return len;
   for(char *p=url, *end=url+len; url != end; ++url, ++p) {
     if(*url == '%') {
       if(url >= end-2) {

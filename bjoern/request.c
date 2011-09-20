@@ -22,9 +22,10 @@ Request* Request_new(int client_fd, const char* client_addr, WsgiServer *wsgi_se
   static unsigned long request_id = 0;
   request->id = request_id++;
 #endif
-  request->wsgi_server = wsgi_server;
   request->client_fd = client_fd;
   request->client_addr = PyString_FromString(client_addr);
+  Py_INCREF(wsgi_server);
+  request->wsgi_server = wsgi_server;
   http_parser_init((http_parser*)&request->parser, HTTP_REQUEST);
   request->parser.parser.data = request;
   Request_reset(request);
@@ -42,6 +43,7 @@ void Request_free(Request* request)
 {
   Request_clean(request);
   Py_DECREF(request->client_addr);
+  Py_DECREF(request->wsgi_server);
   free(request);
 }
 
@@ -224,9 +226,7 @@ on_message_complete(http_parser* parser)
     ((Iobject*)body)->pos = 0;
   } else {
     /* Request has no body */
-    //PyObject *v = PycStringIO->NewInput(_empty_string);
-    PyObject *v = PycStringIO->NewInput(PyString_FromString(""));
-    _set_header_free_value(_wsgi_input, v);
+    _set_header_free_value(_wsgi_input, PycStringIO->NewInput(_empty_string));
   }
 
   PyDict_Update(REQUEST->headers, REQUEST->wsgi_server->wsgi_base_dict);
@@ -279,3 +279,9 @@ parser_settings = {
   on_message_begin, on_path, on_query_string, NULL, NULL, on_header_field,
   on_header_value, on_headers_complete, on_body, on_message_complete
 };
+
+void
+_init_request(void)
+{
+  PycString_IMPORT;
+}

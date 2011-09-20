@@ -1,4 +1,5 @@
 #include <Python.h>
+#include "request.h"
 #include "server.h"
 #include "wsgi.h"
 #include "filewrapper.h"
@@ -27,6 +28,7 @@ initbjoern(void)
 {
   PyObject *bjoern_module;
   _init_common();
+  _init_request();
   _init_server();
   _init_filewrapper();
 
