@@ -39,9 +39,12 @@ static bool send_chunk(Request*);
 static bool do_sendfile(Request*);
 static bool handle_nonzero_errno(Request*);
 
+static PyObject *_wsgi_servers;
+
 typedef struct {
   PyObject_HEAD
   PyObject *callbacks;     /* callbacks */
+  PyObject *sock;     /* callbacks */
   int socket;
   struct evloop *ev_loop;
 } WsgiServer;
@@ -53,7 +56,11 @@ WsgiServer_dealloc(WsgiServer *self)
   if (self->socket >= 0) {
     close(self->socket);
   }
-  Py_XDECREF(self->callbacks);
+  if (self->sock != NULL) {
+    PyDict_DelItem(_wsgi_servers, self->sock);
+    Py_DECREF(self->sock);
+  }
+  Py_DECREF(self->callbacks);
   self->ob_type->tp_free((PyObject*)self);
 }
 
@@ -66,17 +73,18 @@ WsgiServer_init(WsgiServer *self, PyObject *args, PyObject *kwds)
   }
   self->socket = -1;
   if (!self->callbacks) {
-    self->callbacks = PyDict_New();
-  } else if (!PyDict_Check(self->callbacks)) {
-    PyErr_SetString(
-      PyExc_RuntimeError,
-      "Must call bjoern.listen(app, host, port) before "
-      "calling bjoern.run() without arguments."
-      );
+    if ((self->callbacks = PyDict_New()) == NULL)
       return -1;
+  } else if (!PyDict_Check(self->callbacks)) {
+    PyErr_SetString(PyExc_TypeError, "callbacks must be a dictionary");
+    return -1;
   } else {
     Py_INCREF(self->callbacks);
   }
+
+  Py_INCREF(Py_None);
+  self->sock = Py_None;
+
   return 0;
 }
 
@@ -94,8 +102,33 @@ WsgiServer_listen(WsgiServer *self, PyObject*args) {
     return NULL;
   }
 
+  /* If we already listened() for this server, we need to close the existing
+   * socket
+   */
+  if (self->socket >= 0) {
+    PyDict_DelItem(_wsgi_servers, self->sock);
+    Py_DECREF(self->sock);
+    close(self->socket);
+    self->socket = -1;
+  }
+
   if ((self->socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
     PyErr_SetString(PyExc_IOError, "failed to create socket");
+    return NULL;
+  }
+
+  /* expose the python version of the socket fd */
+  if ((self->sock = PyInt_FromLong((long) port)) < 0) {
+    close(self->socket);
+    self->socket = -1;
+    return NULL;
+  }
+
+  /* update the global socket map */
+  if (PyDict_SetItem(_wsgi_servers, self->sock, self) < 0) {
+    close(self->socket);
+    self->socket = -1;
+    Py_DECREF(self->sock);
     return NULL;
   }
 
@@ -121,6 +154,8 @@ WsgiServer_listen(WsgiServer *self, PyObject*args) {
   Py_RETURN_NONE;
 
 listen_err:
+  PyDict_DelItem(_wsgi_servers, self->sock);
+  Py_DECREF(self->sock);
   close(self->socket);
   self->socket = -1;
   return NULL;
@@ -128,6 +163,7 @@ listen_err:
 
 static PyMemberDef WsgiServer_members[] = {
   {"callbacks", T_OBJECT_EX, offsetof(WsgiServer, callbacks), 0, "callbacks to run"},
+  {"_sockfd", T_OBJECT_EX, offsetof(WsgiServer, sock), 0, "the fd of the socket"},
   {NULL}
 };
 
@@ -178,6 +214,7 @@ ev_signal_on_sigint(struct ev_loop* mainloop, ev_signal* watcher, const int even
 
 bool server_init(const char* hostaddr, const int port)
 {
+  return true;
 }
 
 static void
@@ -416,11 +453,17 @@ handle_nonzero_errno(Request* request)
   }
 }
 
-void _init_server(void)
+bool _init_server(void)
 {
     WsgiServer_Type.tp_new = PyType_GenericNew;
     WsgiServer_Type.tp_init = WsgiServer_init;
     WsgiServer_Type.tp_flags |= Py_TPFLAGS_DEFAULT;
     WsgiServer_Type.tp_members = WsgiServer_members;
     WsgiServer_Type.tp_methods = WsgiServer_methods;
+
+    _wsgi_servers = PyDict_New();
+    if (_wsgi_servers == NULL) {
+      return false;
+    }
+    return true;
 }

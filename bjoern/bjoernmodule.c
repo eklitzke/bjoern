@@ -62,5 +62,5 @@ initbjoern(void)
   Py_INCREF(&StartResponse_Type);
 
   PyModule_AddObject(bjoern_module, "version", Py_BuildValue("(ii)", 1, 2));
-  PyModule_AddObject(bjoern_module, "WsgiServer", (PyObject *) &WsgiServer_Type);
+  PyModule_AddObject(bjoern_module, "WSGIServer", (PyObject *) &WsgiServer_Type);
 }
